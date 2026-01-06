@@ -1,0 +1,29 @@
+{
+  "name": "runcomfy-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for RunComfy API - Generate videos and images with AI",
+  "main": "index.js",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "src",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "start": "bun index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.5.0"
+  },
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
