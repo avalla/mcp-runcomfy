@@ -5,6 +5,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import { Buffer } from "node:buffer";
+import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, extname, join } from "node:path";
+
 export async function startRunComfyMcpServer({
   apiKey,
   apiClient,
@@ -211,15 +216,109 @@ export async function startRunComfyMcpServer({
             },
           },
         },
+
+        {
+          name: "runcomfy_download_media",
+          description:
+            "Download a generated media (image/video) to local disk. You can pass a direct media URL, or a request_id to resolve the media URL from RunComfy results.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: {
+                type: "string",
+                description: "Direct HTTPS URL to the media file to download",
+              },
+              request_id: {
+                type: "string",
+                description:
+                  "Optional: resolve media URL from a completed RunComfy request_id (via /v1/requests/{request_id}/result)",
+              },
+              kind: {
+                type: "string",
+                description: "Preferred media kind when resolving from request_id",
+                enum: ["image", "video"],
+              },
+              index: {
+                type: "number",
+                description:
+                  "Optional index when the result contains multiple images/videos (0-based)",
+              },
+              output_dir: {
+                type: "string",
+                description:
+                  "Directory where the file will be saved (defaults to a temp folder)",
+              },
+              filename: {
+                type: "string",
+                description:
+                  "Optional output filename (if omitted, it will be inferred from URL or request_id)",
+              },
+              overwrite: {
+                type: "boolean",
+                description: "Overwrite if the target file already exists",
+                default: false,
+              },
+              return_mode: {
+                type: "string",
+                description:
+                  "How to return the downloaded media. path: only return saved_path in JSON. resource_link: also include a file:// resource_link. embedded: also include an embedded resource with base64 blob.",
+                enum: ["path", "resource_link", "embedded"],
+                default: "path",
+              },
+            },
+          },
+        },
       ],
     };
   });
+
+  function inferExtensionFromMimeType(mimeType) {
+    const normalized = String(mimeType || "").split(";")[0].trim().toLowerCase();
+    switch (normalized) {
+      case "image/png":
+        return ".png";
+      case "image/jpeg":
+        return ".jpg";
+      case "image/webp":
+        return ".webp";
+      case "image/gif":
+        return ".gif";
+      case "video/mp4":
+        return ".mp4";
+      case "video/webm":
+        return ".webm";
+      default:
+        return "";
+    }
+  }
+
+  function pickMediaUrlFromResult(result, { kind, index }) {
+    const output = result?.output && typeof result.output === "object" ? result.output : null;
+    if (!output) return null;
+
+    const safeIndex = Number.isFinite(index) ? Math.max(0, Math.floor(index)) : 0;
+
+    const images = Array.isArray(output.images) ? output.images : [];
+    const videos = Array.isArray(output.videos) ? output.videos : [];
+
+    const candidates = [];
+    if (output.image) candidates.push({ kind: "image", url: output.image });
+    if (output.video) candidates.push({ kind: "video", url: output.video });
+
+    for (const url of images) candidates.push({ kind: "image", url });
+    for (const url of videos) candidates.push({ kind: "video", url });
+
+    const filtered = kind ? candidates.filter((c) => c.kind === kind) : candidates;
+    const picked = filtered[safeIndex] ?? filtered[0] ?? candidates[0];
+    return picked?.url || null;
+  }
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
       let result;
+      let extraContent = [];
 
       switch (name) {
         case "runcomfy_generate_video": {
@@ -295,6 +394,119 @@ export async function startRunComfyMcpServer({
           });
           break;
 
+        case "runcomfy_download_media": {
+          const outputDir =
+            typeof args.output_dir === "string" && args.output_dir.trim().length > 0
+              ? args.output_dir.trim()
+              : join(tmpdir(), "runcomfy-media");
+
+          await mkdir(outputDir, { recursive: true });
+
+          let mediaUrl = typeof args.url === "string" && args.url.trim().length > 0 ? args.url : null;
+          const requestId =
+            typeof args.request_id === "string" && args.request_id.trim().length > 0
+              ? args.request_id.trim()
+              : null;
+
+          if (!mediaUrl && requestId) {
+            const runcomfyResult = await apiClient.getResult(requestId);
+            mediaUrl = pickMediaUrlFromResult(runcomfyResult, {
+              kind: args.kind,
+              index: args.index,
+            });
+          }
+
+          if (!mediaUrl) {
+            throw new Error("Provide either url or request_id (with an available output image/video)");
+          }
+
+          const response = await fetch(mediaUrl);
+          if (!response.ok) {
+            const errorText = await response.text().catch(() => "");
+            throw new Error(`Media download failed: ${response.status} - ${errorText}`);
+          }
+
+          const contentType = response.headers.get("content-type") || "";
+          const inferredExt = inferExtensionFromMimeType(contentType);
+
+          let finalFilename =
+            typeof args.filename === "string" && args.filename.trim().length > 0
+              ? args.filename.trim()
+              : null;
+
+          if (!finalFilename) {
+            const pathname = (() => {
+              try {
+                return new URL(mediaUrl).pathname;
+              } catch {
+                return "";
+              }
+            })();
+
+            const base = pathname ? basename(pathname) : "";
+            finalFilename = base && base.length > 0 ? base : null;
+          }
+
+          if (!finalFilename) {
+            const safeKind = args.kind === "video" ? "video" : "image";
+            finalFilename = requestId
+              ? `runcomfy-${requestId}-${safeKind}${inferredExt || ""}`
+              : `runcomfy-${safeKind}${inferredExt || ""}`;
+          }
+
+          if (!extname(finalFilename) && inferredExt) {
+            finalFilename = `${finalFilename}${inferredExt}`;
+          }
+
+          const outputPath = join(outputDir, finalFilename);
+          const buffer = await response.arrayBuffer();
+          const bytes = buffer.byteLength;
+
+          const file = Bun.file(outputPath);
+          if ((await file.exists()) && !args.overwrite) {
+            throw new Error(`File already exists: ${outputPath} (set overwrite=true to replace)`);
+          }
+
+          await Bun.write(outputPath, new Uint8Array(buffer));
+
+          const returnMode =
+            args.return_mode === "resource_link" || args.return_mode === "embedded"
+              ? args.return_mode
+              : "path";
+
+          result = {
+            ok: true,
+            url: mediaUrl,
+            saved_path: outputPath,
+            bytes,
+            mime_type: contentType || null,
+            return_mode: returnMode,
+          };
+
+          extraContent = [];
+          if (returnMode === "resource_link") {
+            extraContent.push({
+              type: "resource_link",
+              uri: `file://${outputPath}`,
+              name: finalFilename,
+              mimeType: contentType || undefined,
+            });
+          }
+
+          if (returnMode === "embedded") {
+            const base64 = Buffer.from(new Uint8Array(buffer)).toString("base64");
+            extraContent.push({
+              type: "resource",
+              resource: {
+                uri: `file://${outputPath}`,
+                mimeType: contentType || undefined,
+                blob: base64,
+              },
+            });
+          }
+          break;
+        }
+
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -305,6 +517,7 @@ export async function startRunComfyMcpServer({
             type: "text",
             text: JSON.stringify(result, null, 2),
           },
+          ...(Array.isArray(extraContent) ? extraContent : []),
         ],
       };
     } catch (error) {

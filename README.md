@@ -71,6 +71,20 @@ Cancel a queued request.
 ### runcomfy_list_models
 List available models plus curated alias maps for video and image.
 
+### runcomfy_download_media
+Download a generated media to local disk. Parameters:
+- `url`: Direct HTTPS URL to the media file
+- `request_id`: Resolve the media URL from a completed request (via `/v1/requests/{request_id}/result`)
+- `kind`: Preferred output kind when resolving from `request_id` (`image` or `video`)
+- `index`: Optional index if multiple outputs exist (0-based)
+- `output_dir`: Directory to save into (defaults to a temp folder)
+- `filename`: Optional filename override
+- `overwrite`: Overwrite if file exists (default `false`)
+- `return_mode`: How to return the downloaded media (default `path`)
+  - `path`: Return only JSON with `saved_path`
+  - `resource_link`: Also return a `resource_link` pointing to `file://...`
+  - `embedded`: Also return an embedded `resource` with base64 `blob`
+
 ## Usage example
 
 ```
@@ -99,6 +113,35 @@ runcomfy_edit_image({
   prompt: "Change the background to a dark gradient and add a subtle teal glow",
   model: "flux-2-dev-edit",
   image_urls: ["https://example.com/input.png"]
+})
+
+// Download result media by URL
+runcomfy_download_media({
+  url: "https://example.com/output.png",
+  output_dir: "/tmp",
+  filename: "output.png",
+  overwrite: true
+})
+
+// Download result media by request_id
+runcomfy_download_media({
+  request_id: "abc123",
+  kind: "image",
+  index: 0
+})
+
+// Download and return a resource_link
+runcomfy_download_media({
+  request_id: "abc123",
+  kind: "image",
+  return_mode: "resource_link"
+})
+
+// Download and return an embedded base64 resource
+runcomfy_download_media({
+  request_id: "abc123",
+  kind: "image",
+  return_mode: "embedded"
 })
 ```
 
